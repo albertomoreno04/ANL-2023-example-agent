@@ -1,7 +1,8 @@
 import logging
+from decimal import Decimal
 from random import randint
 from time import time
-from typing import cast
+from typing import cast, TypedDict
 
 from geniusweb.actions.Accept import Accept # Accept Offer (Action with Bid)
 from geniusweb.actions.Action import Action
@@ -29,6 +30,20 @@ from tudelft_utilities_logging.ReportToLogger import ReportToLogger
 
 from .utils.group32_opponent import OpponentModel
 
+# Loggin Utils
+class SessionData(TypedDict):
+    # TODO: Additionally keep track of other metrics
+    progressAtFinish: float
+    utilityAtFinish: float
+    didAccept: bool
+    isGood: bool
+    topBidsPercentage: float
+    forceAcceptAtRemainingTurns: float
+
+class DataDict(TypedDict):
+    sessions: list[SessionData]
+
+
 class Group32Agent(DefaultParty):
     """
     Template of a Python geniusweb agent.
@@ -47,9 +62,33 @@ class Group32Agent(DefaultParty):
         self.settings: Settings = None
         self.storage_dir: str = None
 
+        self.data_dict : DataDict = None
+
         self.last_received_bid: Bid = None
         self.opponent_model: OpponentModel = None
+
+        # Keep track of all bids from opponent (and yours?)
+        self.all_bids : AllBidsList = None
+        self.bids_with_utilities : list[tuple[Bid, float]] = None
+        self.num_of_top_bids : int = 1
+        self.min_util : float = 0.8 # TODO: Adjust value
+
+        # Logging helpers
+        self.round_times : list[Decimal] = []
+        self.last_time = None
+        self.avg_time = None
+        self.utility_at_finish : float = 0
+        self.did_accept : bool = False
+        self.top_bids_percentage: float = 1 / 300
+        self.force_accept_at_remaining_turns: float = 1
+        self.force_accept_at_remaining_turns_light: float = 1
+        self.opponent_best_bid: Bid = None
         self.logger.log(logging.INFO, "party is initialized")
+
+        # Params
+        self.r1 = 0.2 # Decision utility weight
+        self.r2 = 0.3 # Experienced utility weight
+        self.r3 = 0.5 # Overall relationship weight
 
     def notifyChange(self, data: Inform):
         """MUST BE IMPLEMENTED
@@ -116,7 +155,7 @@ class Group32Agent(DefaultParty):
             Capabilities: Capabilities representation class
         """
         return Capabilities(
-            set(["SAOP"]), # Self-Adaptative Opponent Model
+            set(["SAOP"]), # Stacked Alternating Offers Protocol
             set(["geniusweb.profile.utilityspace.LinearAdditive"]), # Defines utility space as a Linear Additive function
         )
 
@@ -201,47 +240,107 @@ class Group32Agent(DefaultParty):
         ]
         return all(conditions)
 
-    def find_bid(self) -> Bid: # TODO: Implement
+    def find_bid(self) -> Bid:
         # compose a list of all possible bids
+        # Retrieve all possible bids from the negotiation domain.
         domain = self.profile.getDomain()
         all_bids = AllBidsList(domain)
 
-        best_bid_score = 0.0
+        best_bid_score = -float('inf')
         best_bid = None
 
-        # take 500 attempts to find a bid according to a heuristic score
-        for _ in range(500):
+        # Try 500 random bids.
+        for _ in range(500): # TODO: Probably do intelligent search
             bid = all_bids.get(randint(0, all_bids.size() - 1))
             bid_score = self.score_bid(bid)
             if bid_score > best_bid_score:
-                best_bid_score, best_bid = bid_score, bid
+                best_bid_score = bid_score
+                best_bid = bid
 
         return best_bid
 
-    def score_bid(self, bid: Bid, alpha: float = 0.95, eps: float = 0.1) -> float: # TODO:Implement
-        """Calculate heuristic score for a bid
+    def score_bid(self, bid: Bid) -> float:
+        # alpha: your own utility for the bid at the current time.
+        alpha = self.get_utility(bid, self.last_time)
 
-        Args:
-            bid (Bid): Bid to score
-            alpha (float, optional): Trade-off factor between self interested and
-                altruistic behaviour. Defaults to 0.95.
-            eps (float, optional): Time pressure factor, balances between conceding
-                and Boulware behaviour over time. Defaults to 0.1.
+        # opp_utility: the opponent's utility for the bid based on your current belief (BT(t)).
+        opp_utility = self.get_opponent_utility(bid, self.last_time)
 
-        Returns:
-            float: score
+        # For the purpose of ranking offers, we assume that the Luce number is proportional
+        # to the raw utility (since the denominator is constant across bids).
+        lu_own = alpha
+        lu_opp = opp_utility
+
+        # beta: combine the Luce numbers (i.e. likelihood estimates) with the opponent's utility.
+        beta = (lu_opp + lu_own) * opp_utility
+
+        # The QO function selects the bid maximizing min{alpha, beta}.
+        return min(alpha, beta)
+
+    def get_utility(self, bid : Bid, time : float) -> Decimal:
+        pure_util = self.profile.getUtility(bid) # TODO: Check this
+
+        # Compute the decision utility component for relationship measurement.
+        decision_util = self.get_decision_utility(bid, time)
+
+        experienced_util = self.get_experienced_utility(bid, time) # Based on bid-history
+
+        # r1: weight for decision utility
+        # r2: weight for experienced utility
+        # r3: overall weight for relationship measurement
+        overall_util = pure_util + self.r3 * (self.r1 * decision_util + self.r2 * experienced_util)
+
+        return overall_util
+
+    def get_decision_utility(self, bid : Bid, time : float) -> float:
         """
-        progress = self.progress.get(time() * 1000)
+        Heuristic:  If the current bid shows a concession compared to our last bid,
+            then decision utility increases because we are 'sacrificing' some profit to preserve the relationship.
+            Otherwise, if our bid is more aggressive (i.e. higher profit than before), we lower decision utility.
+        return: utility value
+        """
 
-        our_utility = float(self.profile.getUtility(bid))
+        # If concession present, increase decision utility since we are trying to preserve the relationship
+        if self.last_received_bid is not None:
+            prev_util = self.profile.getUtility(self.last_received_bid) # Get pure utility
+            current_util = self.profile.getUtility(bid)
 
-        time_pressure = 1.0 - progress ** (1 / eps)
-        score = alpha * time_pressure * our_utility
+            delta = prev_util - current_util # Normalized delta
 
-        if self.opponent_model is not None:
-            opponent_utility = self.opponent_model.get_predicted_utility(bid)
-            opponent_score = (1.0 - alpha * time_pressure) * opponent_utility
-            score += opponent_score
+            # If we are conceding (delta positive), decision utility increases;
+            # if not, we set a low decision utility.
+            decision_util = max(0, delta)
+        else:
+            decision_util = 0.5 # Neutral value
 
-        return score
+        return decision_util
 
+
+    def get_experienced_utility(self, bid : Bid, time : float) -> float:
+        """
+        Heuristic: Similar bids have smaller distance and hence higher experience utility.
+        """
+        if self.last_received_bid is not None:
+            distance = self.bid_distance(bid, self.last_received_bid)
+            # More similarity (i.e., smaller distance) means higher experienced utility.
+            experienced_util = 1 - distance
+        else:
+            experienced_util = 1.0  # Maximum credibility if there is no previous bid.
+        return experienced_util
+
+    def bid_distance(self, bid1: Bid, bid2: Bid) -> float:
+        """
+        Computes a simple normalized distance between two bids.
+        """
+        issues = list(bid1.keys())
+        total = len(issues)
+        if total == 0:
+            return 0.0
+        diff_count = sum(1 for issue in issues if bid1[issue] != bid2.get(issue))
+        return diff_count / total
+
+    def get_opponent_utility(self, bid : Bid, time : float) -> float:
+        pass
+
+
+# TODO: Get Opponent Utilities + Map them to classes

@@ -38,7 +38,7 @@ if not session_results_trace["error"]:
     plot_trace(session_results_trace, RESULTS_DIR.joinpath("trace_plot.html"))
 
 # write results to file
-with open(RESULTS_DIR.joinpath("session_results_trace.json"), "w", encoding="utf-8") as f:
+with open(RESULTS_DIR.joinpath("/session_results_trace.json"), "w", encoding="utf-8") as f:
     f.write(json.dumps(session_results_trace, indent=2))
 with open(RESULTS_DIR.joinpath("session_results_summary.json"), "w", encoding="utf-8") as f:
     f.write(json.dumps(session_results_summary, indent=2))
