@@ -1,8 +1,9 @@
 import logging
-from random import randint
+from random import randint, random
 from time import time
 from typing import cast
 
+from bisect import insort_right
 from geniusweb.actions.Accept import Accept # Accept Offer (Action with Bid)
 from geniusweb.actions.Action import Action
 from geniusweb.actions.Offer import Offer # Throws Bid
@@ -48,6 +49,7 @@ class Group32Agent(DefaultParty):
         self.storage_dir: str = None
 
         self.last_received_bid: Bid = None
+        self.received_bids: List[Bid] = []
         self.opponent_model: OpponentModel = None
         self.logger.log(logging.INFO, "party is initialized")
 
@@ -156,6 +158,7 @@ class Group32Agent(DefaultParty):
             self.opponent_model.update(bid)
             # set bid as last received
             self.last_received_bid = bid
+            self.received_bids.append(bid)
 
     def my_turn(self):
         """This method is called when it is our turn. It should decide upon an action
@@ -168,10 +171,51 @@ class Group32Agent(DefaultParty):
         else:
             # if not, find a bid to propose as counter offer
             bid = self.find_bid()
-            action = Offer(self.me, bid)
-
+            # Check if our new offer's utility is within a (0.05) threshold of the received offer
+            if abs(float(self.profile.getUtility(bid)) - float(self.profile.getUtility(self.last_received_bid))) <= 0.05:
+                # If it is our new offer has a high probability of getting accepted, so we reject and send our new offer
+                action = Offer(self.me, bid)
+            else:
+                # If not, there is a high probability our offer will be rejected, therefore we send the new offer based
+                # on a probability, this probability is defined by the rank number of the received offer
+                probability_of_accepting = self.get_rank(self.last_received_bid)
+                if random.random() < probability_of_accepting:
+                    # Accept the opponent's offer with probability equal to its rank
+                    action = Accept(self.me, self.last_received_bid)
+                else:
+                    # Otherwise, propose a counter-offer
+                    bid = self.find_bid()
+                    action = Offer(self.me, bid)
         # send the action
         self.send_action(action)
+
+    def get_rank(self, bid: Bid) -> float:
+        """Calculate the rank number of a given offer.
+
+            The rank is determined by ordering all received bids in descending order of utility,
+            then assigning a rank based on the position of the bid in this list, normalized to [0,1].
+
+            Args:
+                bid (Bid): The bid whose rank number needs to be calculated.
+
+            Returns:
+                float: The rank of the bid, a value between 0 and 1.
+            """
+        if not self.received_bids:
+            return 0.0  # If no bids are received, default to rank 0.
+
+        sorted_bids = sorted(self.received_bids, key=lambda b: self.profile.getUtility(b), reverse=True)
+
+        # Find the index of the bid
+        try:
+            index = sorted_bids.index(bid)
+        except ValueError:
+            return 0.0
+
+        rank = (index + 1) / len(sorted_bids)
+
+        return rank
+
 
     def save_data(self):
         """This method is called after the negotiation is finished. It can be used to store data
