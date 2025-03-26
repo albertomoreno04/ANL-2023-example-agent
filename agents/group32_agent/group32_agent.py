@@ -1,4 +1,5 @@
 import logging
+import random
 from decimal import Decimal
 from random import randint
 from time import time
@@ -64,7 +65,9 @@ class Group32Agent(DefaultParty):
 
         self.data_dict : DataDict = None
 
+
         self.last_received_bid: Bid = None
+        self.received_bids: List[Bid] = []
         self.opponent_model: OpponentProfile = None
 
         # Keep track of all bids from opponent (and yours?)
@@ -139,7 +142,8 @@ class Group32Agent(DefaultParty):
         # YourTurn notifies you that it is your turn to act
         elif isinstance(data, YourTurn):
             # execute a turn
-            self.my_turn()
+            self.my_turn2()
+            #self.my_turn()
 
         # Finished will be send if the negotiation has ended (through agreement or deadline)
         elif isinstance(data, Finished):
@@ -192,10 +196,48 @@ class Group32Agent(DefaultParty):
             bid = cast(Offer, action).getBid()
             # Initialize opponent model if it is not yet initialized.
             if self.opponent_model is None:
-                possible_types = [1, 2, 3] # TODO: Think of a more sophisticated way
+                possible_types = list(range(1, len(self.domain.getIssues()) + 1))
                 self.opponent_model = OpponentProfile(self.domain, possible_types)
             self.opponent_model.update(bid)
             self.last_received_bid = bid
+            self.received_bids.append(bid)
+
+    def my_turn2(self):
+        if self.last_received_bid is None:
+            action = Offer(self.me, self.find_bid())
+            self.send_action(action)
+            return
+
+        # 1) Compute your best counter-offer, QO(t).
+        counter_bid = self.find_bid()
+
+        # 2) Check if the opponent's last offer is better for you than your own new bid.
+        #    If so, accept immediately (the agent's utility for last_received_bid >= utility of counter_bid).
+        last_offer_util = float(self.profile.getUtility(self.last_received_bid))
+        new_bid_util = float(self.profile.getUtility(counter_bid))
+        if last_offer_util >= new_bid_util:
+            # Paper says: accept if u1(offerOpp) >= u1(QO(t))
+            action = Accept(self.me, self.last_received_bid)
+            self.send_action(action)
+            return
+
+        # 3) Otherwise, do not immediately reject. Compare the opponent's believed utility for each bid.
+        opp_util_old = float(self.get_opponent_utility(self.last_received_bid, self.last_time))
+        opp_util_new = float(self.get_opponent_utility(counter_bid, self.last_time))
+
+        # 4) If the difference in the opponent's believed utility is small (<= T), propose your new bid.
+        if abs(opp_util_new - opp_util_old) <= 0.05:  # threshold T=0.05 from paper
+            action = Offer(self.me, counter_bid)
+        else:
+            # 5) If difference is large, accept the old offer with probability = rank(last_received_bid).
+            #    Otherwise, propose your new bid.
+            prob_accept = self.get_rank(self.last_received_bid)
+            if random.random() < prob_accept:
+                action = Accept(self.me, self.last_received_bid)
+            else:
+                action = Offer(self.me, counter_bid)
+
+        self.send_action(action)
 
     def my_turn(self):
         """This method is called when it is our turn. It should decide upon an action
@@ -233,10 +275,37 @@ class Group32Agent(DefaultParty):
         # very basic approach that accepts if the offer is valued above 0.7 and
         # 95% of the time towards the deadline has passed
         conditions = [
-            self.profile.getUtility(bid) > 0.8,
+            self.profile.getUtility(bid) > 0.7, # TODO: Reservation condition???
             progress > 0.95,
         ]
         return all(conditions)
+
+    def get_rank(self, bid: Bid) -> float:
+        """Calculate the rank number of a given offer.
+
+            The rank is determined by ordering all received bids in descending order of utility,
+            then assigning a rank based on the position of the bid in this list, normalized to [0,1].
+
+            Args:
+                bid (Bid): The bid whose rank number needs to be calculated.
+
+            Returns:
+                float: The rank of the bid, a value between 0 and 1.
+            """
+        if not self.received_bids:
+            return 0.0  # If no bids are received, default to rank 0.
+
+        sorted_bids = sorted(self.received_bids, key=lambda b: self.profile.getUtility(b), reverse=True)
+
+        # Find the index of the bid
+        try:
+            index = sorted_bids.index(bid)
+        except ValueError:
+            return 0.0
+
+        rank = (index + 1) / len(sorted_bids)
+
+        return rank
 
     def find_bid(self) -> Bid:
         domain = self.profile.getDomain()
@@ -297,7 +366,7 @@ class Group32Agent(DefaultParty):
         # r1: weight for decision utility
         # r2: weight for experienced utility
         # r3: overall weight for relationship measurement
-        overall_util = pure_util + self.r3 * (self.r1 * decision_util + self.r2 * experienced_util)
+        overall_util = pure_util + self.r3 * (self.r1 * decision_util + self.r2 * experienced_util) # TODO: Change
 
         # Cast to float
         return float(overall_util)
