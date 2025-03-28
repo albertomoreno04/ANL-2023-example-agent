@@ -29,9 +29,6 @@ tournament_settings = {
         {
             "class": "agents.linear_agent.linear_agent.LinearAgent",
         },
-        {
-            "class": "agents.stupid_agent.stupid_agent.StupidAgent",
-        },
     ],
     "profile_sets": [
         ["domains/domain05/profileA.json", "domains/domain05/profileB.json"],

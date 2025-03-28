@@ -1,8 +1,9 @@
 import logging
+import math
 import random
 from decimal import Decimal
 from random import randint
-from time import time
+import time
 from typing import cast, TypedDict, List
 
 from geniusweb.actions.Accept import Accept # Accept Offer (Action with Bid)
@@ -30,6 +31,7 @@ from geniusweb.references.Parameters import Parameters
 from tudelft_utilities_logging.ReportToLogger import ReportToLogger
 
 from .utils.group32_opponent import OpponentProfile
+from .utils.group32_bayesian_opponent import OpponentModel
 
 # Loggin Utils
 class SessionData(TypedDict):
@@ -68,7 +70,7 @@ class Group32Agent(DefaultParty):
 
         self.last_received_bid: Bid = None
         self.received_bids: List[Bid] = []
-        self.opponent_model: OpponentProfile = None
+        self.opponent_model: OpponentModel = None
 
         # Keep track of all bids from opponent (and yours?)
         self.all_bids : AllBidsList = None
@@ -82,17 +84,17 @@ class Group32Agent(DefaultParty):
         self.avg_time = None
         self.utility_at_finish : float = 0
         self.did_accept : bool = False
-        self.top_bids_percentage: float = 1 / 300
+        self.top_bids_percentage: float = 0.01
         self.force_accept_at_remaining_turns: float = 1
         self.force_accept_at_remaining_turns_light: float = 1
         self.opponent_best_bid: Bid = None
         self.logger.log(logging.INFO, "party is initialized")
         self.sum_of_alphas = 0
 
-        # Params
-        self.r1 = 0.2 # Decision utility weight
-        self.r2 = 0.3 # Experienced utility weight
-        self.r3 = 0.5 # Overall relationship weight
+        self.r1 = 0.5
+        self.r2 = 0.4
+        self.r3 = 0.8
+
 
     def notifyChange(self, data: Inform):
         """MUST BE IMPLEMENTED
@@ -115,16 +117,18 @@ class Group32Agent(DefaultParty):
             self.parameters = self.settings.getParameters()
             self.storage_dir = self.parameters.get("storage_dir")
 
+
             # the profile contains the preferences of the agent over the domain
             profile_connection = ProfileConnectionFactory.create(
                 data.getProfile().getURI(), self.getReporter()
             )
+
             self.profile = profile_connection.getProfile()
             self.domain = self.profile.getDomain()
             profile_connection.close()
 
-            # Initialize alpha sum for Luce number computation
-            self.init_sum_of_alphas()
+            # Initialize all bids
+            self.all_bids = AllBidsList(self.domain)
 
         # ActionDone informs you of an action (an offer or an accept)
         # that is performed by one of the agents (including yourself).
@@ -142,8 +146,7 @@ class Group32Agent(DefaultParty):
         # YourTurn notifies you that it is your turn to act
         elif isinstance(data, YourTurn):
             # execute a turn
-            self.my_turn2()
-            #self.my_turn()
+            self.my_turn()
 
         # Finished will be send if the negotiation has ended (through agreement or deadline)
         elif isinstance(data, Finished):
@@ -187,7 +190,6 @@ class Group32Agent(DefaultParty):
 
     def opponent_action(self, action):
         """Process an action that was received from the opponent.
-
         Args:
             action (Action): action of opponent
         """
@@ -196,13 +198,16 @@ class Group32Agent(DefaultParty):
             bid = cast(Offer, action).getBid()
             # Initialize opponent model if it is not yet initialized.
             if self.opponent_model is None:
-                possible_types = list(range(1, len(self.domain.getIssues()) + 1))
-                self.opponent_model = OpponentProfile(self.domain, possible_types)
+                # possible_types = list(range(1, len(self.domain.getIssues()) + 1))
+                # self.opponent_model = OpponentProfile(self.domain, possible_types)
+                self.opponent_model = OpponentModel(self.domain)
+
+            # Bayesian update based on each bid
             self.opponent_model.update(bid)
             self.last_received_bid = bid
             self.received_bids.append(bid)
 
-    def my_turn2(self):
+    def my_turn(self):
         if self.last_received_bid is None:
             action = Offer(self.me, self.find_bid())
             self.send_action(action)
@@ -211,48 +216,31 @@ class Group32Agent(DefaultParty):
         # 1) Compute your best counter-offer, QO(t).
         counter_bid = self.find_bid()
 
-        # 2) Check if the opponent's last offer is better for you than your own new bid.
-        #    If so, accept immediately (the agent's utility for last_received_bid >= utility of counter_bid).
-        last_offer_util = float(self.profile.getUtility(self.last_received_bid))
-        new_bid_util = float(self.profile.getUtility(counter_bid))
-        if last_offer_util >= new_bid_util:
-            # Paper says: accept if u1(offerOpp) >= u1(QO(t))
+        # 2)  Check if the opponent's last offer is significantly better than your counter bid.
+        last_offer_util = float(self.score_bid(self.last_received_bid))
+        new_bid_util = float(self.score_bid(counter_bid))
+        epsilon = 0.05  # margin for immediate acceptance
+        #if last_offer_util >= new_bid_util + epsilon:
+        if last_offer_util >= 0.80:
             action = Accept(self.me, self.last_received_bid)
             self.send_action(action)
             return
 
-        # 3) Otherwise, do not immediately reject. Compare the opponent's believed utility for each bid.
+        # 3) Otherwise, compare the opponent's believed utility for each bid.
         opp_util_old = float(self.get_opponent_utility(self.last_received_bid, self.last_time))
         opp_util_new = float(self.get_opponent_utility(counter_bid, self.last_time))
 
-        # 4) If the difference in the opponent's believed utility is small (<= T), propose your new bid.
-        if abs(opp_util_new - opp_util_old) <= 0.05:  # threshold T=0.05 from paper
+        # 4) Adjust threshold for small utility difference.
+        if abs(opp_util_new - opp_util_old) <= 0.015:  # tighter threshold for offering
             action = Offer(self.me, counter_bid)
         else:
-            # 5) If difference is large, accept the old offer with probability = rank(last_received_bid).
-            #    Otherwise, propose your new bid.
-            prob_accept = self.get_rank(self.last_received_bid)
+            # 5) Lower the probability of acceptance to generate more offers.
+            prob_accept = self.get_rank(self.last_received_bid) * 0.15 # reduce acceptance probability
             if random.random() < prob_accept:
                 action = Accept(self.me, self.last_received_bid)
             else:
                 action = Offer(self.me, counter_bid)
 
-        self.send_action(action)
-
-    def my_turn(self):
-        """This method is called when it is our turn. It should decide upon an action
-        to perform and send this action to the opponent.
-        """
-        # check if the last received offer is good enough
-        if self.accept_condition(self.last_received_bid):
-            # if so, accept the offer
-            action = Accept(self.me, self.last_received_bid)
-        else:
-            # if not, find a bid to propose as counter offer
-            bid = self.find_bid()
-            action = Offer(self.me, bid)
-
-        # send the action
         self.send_action(action)
 
     def save_data(self):
@@ -275,7 +263,7 @@ class Group32Agent(DefaultParty):
         # very basic approach that accepts if the offer is valued above 0.7 and
         # 95% of the time towards the deadline has passed
         conditions = [
-            self.profile.getUtility(bid) > 0.7, # TODO: Reservation condition???
+            self.score_bid(bid) > 0.8, # TODO: Reservation condition???
             progress > 0.95,
         ]
         return all(conditions)
@@ -295,7 +283,7 @@ class Group32Agent(DefaultParty):
         if not self.received_bids:
             return 0.0  # If no bids are received, default to rank 0.
 
-        sorted_bids = sorted(self.received_bids, key=lambda b: self.profile.getUtility(b), reverse=True)
+        sorted_bids = sorted(self.received_bids, key=lambda b: self.score_bid(b), reverse=True)
 
         # Find the index of the bid
         try:
@@ -308,38 +296,37 @@ class Group32Agent(DefaultParty):
         return rank
 
     def find_bid(self) -> Bid:
-        domain = self.profile.getDomain()
-        all_bids = AllBidsList(domain)
+        num_of_bids = self.all_bids.size()
 
-        best_bid_score = -float('inf')
-        best_bid = None
+        if self.bids_with_utilities is None:
+            self.bids_with_utilities = []
 
-        # Try 500 random bids.
-        for _ in range(500): # TODO: Probably do intelligent search
-            bid = all_bids.get(randint(0, all_bids.size() - 1))
-            bid_score = self.score_bid(bid)
-            if bid_score > best_bid_score:
-                best_bid_score = bid_score
-                best_bid = bid
+            for index in range(num_of_bids):
+                bid = self.all_bids.get(index)
+                bid_utility = float(self.score_bid(bid))
+                self.bids_with_utilities.append((bid, bid_utility))
 
-        return best_bid
+            self.bids_with_utilities.sort(key=lambda tup: tup[1], reverse=True)
 
-    # Helper function to compute Luce numbers lazily
-    def init_sum_of_alphas(self):
-        """
-        Computes and stores the sum of your utility over all possible bids in the domain.
-        This is used to calculate Luce(o) = u(o) / SUM_over_all_bids[u(o)].
-        """
-        domain = self.profile.getDomain()
-        all_bids = AllBidsList(domain)
-        total = 0.0
-        # We assume time=None or self.last_time is acceptable here; adjust as needed.
-        for i in range(all_bids.size()):
-            b = all_bids.get(i)
-            # Convert to float in case your get_utility returns Decimal.
-            total += float(self.get_utility(b, None))
-        # Store this to avoid recomputing later.
-        self.sum_of_alphas = total if total > 0 else 1.0
+            self.num_of_top_bids = max(5, num_of_bids * self.top_bids_percentage)
+
+        if (self.last_received_bid is None):
+            return self.bids_with_utilities[0][0]
+
+        progress = self.progress.get(time.time() * 1000)
+        light_threshold = 0.95
+
+        if (progress > light_threshold):
+            return self.opponent_best_bid
+
+        if (num_of_bids < self.num_of_top_bids):
+            self.num_of_top_bids = num_of_bids / 2
+
+        self.min_util = self.bids_with_utilities[math.floor(self.num_of_top_bids) - 1][1]
+
+        picked_ranking = randint(0, math.floor(self.num_of_top_bids) - 1)
+
+        return self.bids_with_utilities[picked_ranking][0]
 
     def score_bid(self, bid: Bid) -> float:
         # alpha: your own utility for the bid at the current time.
@@ -348,7 +335,7 @@ class Group32Agent(DefaultParty):
         # Current belief BT(T)
         opp_utility = self.get_opponent_utility(bid, self.last_time)
 
-        lu_self = alpha / self.sum_of_alphas
+        lu_self = alpha
         lu_opp = opp_utility
 
         beta = (lu_opp + lu_self) * opp_utility
@@ -358,18 +345,22 @@ class Group32Agent(DefaultParty):
     def get_utility(self, bid : Bid, time : float) -> float:
         pure_util = float(self.profile.getUtility(bid)) # Based on values from domain
 
-        # Compute the decision utility component for relationship measurement.
         decision_util = self.get_decision_utility(bid, time)
 
-        experienced_util = self.get_experienced_utility(bid, time) # Based on bid-history
+        experienced_util = self.get_experienced_utility(bid, time)  # Based on bid-history
 
         # r1: weight for decision utility
         # r2: weight for experienced utility
         # r3: overall weight for relationship measurement
-        overall_util = pure_util + self.r3 * (self.r1 * decision_util + self.r2 * experienced_util) # TODO: Change
-
+        overall_util = pure_util + self.r3 * (self.r1 * decision_util + self.r2 * experienced_util)  # TODO: Change
         # Cast to float
         return float(overall_util)
+
+    def get_opponent_utility(self, bid : Bid, time : float) -> float:
+        if self.opponent_model is not None:
+            return self.opponent_model.get_predicted_utility(bid)
+        else:
+            return 0.0
 
     def get_decision_utility(self, bid : Bid, time : float) -> float:
         """
@@ -415,11 +406,5 @@ class Group32Agent(DefaultParty):
             return 0.0
         diff_count = sum(1 for issue in issues if bid1.getIssueValues()[issue] != bid2.getIssueValues()[issue])
         return diff_count / total
-
-    def get_opponent_utility(self, bid : Bid, time : float) -> float:
-        if self.opponent_model is not None:
-            return self.opponent_model.getUtility(bid)
-        else:
-            return 0.0
 
 # TODO: Add time dependence/pressure
