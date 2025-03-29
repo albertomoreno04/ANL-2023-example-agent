@@ -65,7 +65,7 @@ class Group32Agent(DefaultParty):
         self.settings: Settings = None
         self.storage_dir: str = None
 
-        self.data_dict : DataDict = None
+        self.data_dict : DataDict = None # For learning adaptations
 
 
         self.last_received_bid: Bid = None
@@ -77,6 +77,7 @@ class Group32Agent(DefaultParty):
         self.bids_with_utilities : list[tuple[Bid, float]] = None
         self.num_of_top_bids : int = 1
         self.min_util : float = 0.8 # TODO: Adjust value
+        self.previous_opp_bid = None # Initialised later
 
         # Logging helpers
         self.round_times : List[Decimal] = []
@@ -89,11 +90,7 @@ class Group32Agent(DefaultParty):
         self.force_accept_at_remaining_turns_light: float = 1
         self.opponent_best_bid: Bid = None
         self.logger.log(logging.INFO, "party is initialized")
-        self.sum_of_alphas = 0
 
-        self.r1 = 0.5
-        self.r2 = 0.4
-        self.r3 = 0.8
 
 
     def notifyChange(self, data: Inform):
@@ -213,33 +210,51 @@ class Group32Agent(DefaultParty):
             self.send_action(action)
             return
 
-        # 1) Compute your best counter-offer, QO(t).
+        progress = self.progress.get(time.time() * 1000)
+
         counter_bid = self.find_bid()
 
-        # 2)  Check if the opponent's last offer is significantly better than your counter bid.
         last_offer_util = float(self.score_bid(self.last_received_bid))
         new_bid_util = float(self.score_bid(counter_bid))
-        epsilon = 0.05  # margin for immediate acceptance
-        #if last_offer_util >= new_bid_util + epsilon:
-        if last_offer_util >= 0.80:
+
+        opp_util_received = float(self.get_opponent_utility(self.last_received_bid, self.last_time))
+        opp_util_counter = float(self.get_opponent_utility(counter_bid, self.last_time))
+
+        nash_received = last_offer_util * opp_util_received
+        nash_counter = new_bid_util * opp_util_counter
+
+        # Check acceptance
+        if self.accept_condition(self.last_received_bid):
             action = Accept(self.me, self.last_received_bid)
-            self.send_action(action)
-            return
-
-        # 3) Otherwise, compare the opponent's believed utility for each bid.
-        opp_util_old = float(self.get_opponent_utility(self.last_received_bid, self.last_time))
-        opp_util_new = float(self.get_opponent_utility(counter_bid, self.last_time))
-
-        # 4) Adjust threshold for small utility difference.
-        if abs(opp_util_new - opp_util_old) <= 0.015:  # tighter threshold for offering
-            action = Offer(self.me, counter_bid)
         else:
-            # 5) Lower the probability of acceptance to generate more offers.
-            prob_accept = self.get_rank(self.last_received_bid) * 0.15 # reduce acceptance probability
-            if random.random() < prob_accept:
+            if progress < 0.3:
+                # Remain relatively conservative if still in the exploration phase
+                accept_probability = 0.05 if last_offer_util > new_bid_util else 0.0
+            elif progress < 0.8:
+                nash_improvement = (nash_received - nash_counter) / nash_counter if nash_counter > 0 else 0
+                base_probability = 0.2 + progress * 0.3 # Increases proportional to time
+                accept_probability = base_probability * (1 + nash_improvement)
+
+                # Add Tit-for-Tat behaviour - Concede if opponent concedes
+                if hasattr(self, 'previous_opp_bid') and self.previous_opp_bid is not None:
+                    previous_opp_util = float(self.score_bid(self.previous_opp_bid))
+                    if last_offer_util > previous_opp_util:
+                        accept_probability *= 1.2 # Concede
+
+            else:
+                time_pressure = (progress - 0.8) / 0.2 # 0 to 1 in final phase
+                accept_probability = 0.5 + time_pressure * 0.3
+
+                if last_offer_util >= new_bid_util:
+                    accept_probability += 0.2
+
+            if random.random() < accept_probability:
                 action = Accept(self.me, self.last_received_bid)
             else:
                 action = Offer(self.me, counter_bid)
+
+        if hasattr(self, 'last_received_bid') and self.last_received_bid is not None:
+            self.previous_opp_bid = self.last_received_bid
 
         self.send_action(action)
 
@@ -258,15 +273,48 @@ class Group32Agent(DefaultParty):
             return False
 
         # progress of the negotiation session between 0 and 1 (1 is deadline)
-        progress = self.progress.get(time() * 1000)
+        progress = self.progress.get(time.time() * 1000)
 
-        # very basic approach that accepts if the offer is valued above 0.7 and
-        # 95% of the time towards the deadline has passed
-        conditions = [
-            self.score_bid(bid) > 0.8, # TODO: Reservation condition???
-            progress > 0.95,
-        ]
-        return all(conditions)
+        bid_utility = self.score_bid(bid)
+
+        reservation_value = 0.3 # TODO: Consider other values
+
+        next_bid = self.find_bid()
+        next_bid_utility = self.score_bid(next_bid)
+
+        if progress < 0.3:
+            # Exploration phase
+            # TODO: Parametrize as epsilon
+            return bid_utility > next_bid_utility + 0.1 and bid_utility > 0.7
+
+        elif progress < 0.8:
+            alpha = 1.0
+            beta = 0.02
+            if bid_utility >= alpha * next_bid_utility + beta:
+                return True
+
+            # Estimate Nash Products
+            estimated_opponent_utility = self.get_opponent_utility(bid, self.last_time)
+            nash_product = bid_utility * estimated_opponent_utility
+
+            next_bid_nash = next_bid_utility * self.get_opponent_utility(next_bid, self.last_time)
+
+            if nash_product > next_bid_nash * 1.05:
+                return True
+
+            # Else reject
+            return False
+
+        else:
+            # End phase, should be more willing to accept
+            if bid_utility >= reservation_value and bid_utility >= next_bid_utility:
+                return True
+
+            if progress > 0.95 and bid_utility >= reservation_value:
+                return True
+
+            return False
+
 
     def get_rank(self, bid: Bid) -> float:
         """Calculate the rank number of a given offer.
@@ -330,31 +378,22 @@ class Group32Agent(DefaultParty):
 
     def score_bid(self, bid: Bid) -> float:
         # alpha: your own utility for the bid at the current time.
-        alpha = float(self.get_utility(bid, self.last_time))
+        alpha = float(self.get_utility(bid))
 
         # Current belief BT(T)
         opp_utility = self.get_opponent_utility(bid, self.last_time)
 
-        lu_self = alpha
+        lu_self = alpha # Lu(alpha) ~ alpha
         lu_opp = opp_utility
 
         beta = (lu_opp + lu_self) * opp_utility
 
         return float(min(alpha, beta))
 
-    def get_utility(self, bid : Bid, time : float) -> float:
-        pure_util = float(self.profile.getUtility(bid)) # Based on values from domain
+    def get_utility(self, bid : Bid) -> float:
+        pure_util = float(self.profile.getUtility(bid))
 
-        decision_util = self.get_decision_utility(bid, time)
-
-        experienced_util = self.get_experienced_utility(bid, time)  # Based on bid-history
-
-        # r1: weight for decision utility
-        # r2: weight for experienced utility
-        # r3: overall weight for relationship measurement
-        overall_util = pure_util + self.r3 * (self.r1 * decision_util + self.r2 * experienced_util)  # TODO: Change
-        # Cast to float
-        return float(overall_util)
+        return float(pure_util)
 
     def get_opponent_utility(self, bid : Bid, time : float) -> float:
         if self.opponent_model is not None:
@@ -362,49 +401,4 @@ class Group32Agent(DefaultParty):
         else:
             return 0.0
 
-    def get_decision_utility(self, bid : Bid, time : float) -> float:
-        """
-        Heuristic:  If the current bid shows a concession compared to our last bid,
-            then decision utility increases because we are 'sacrificing' some profit to preserve the relationship.
-            Otherwise, if our bid is more aggressive (i.e. higher profit than before), we lower decision utility.
-        return: utility value
-        """
 
-        # If concession present, increase decision utility since we are trying to preserve the relationship
-        if self.last_received_bid is not None:
-            prev_util = float(self.profile.getUtility(self.last_received_bid)) # Get pure utility
-            current_util = float(self.profile.getUtility(bid))
-
-            delta = prev_util - current_util # Normalized delta
-
-            # If we are conceding (delta positive), decision utility increases
-            decision_util = max(0, delta)
-        else:
-            decision_util = 0.5 # Neutral value
-
-        return decision_util
-
-
-    def get_experienced_utility(self, bid : Bid, time : float) -> float:
-        """
-        Heuristic: Similar bids have smaller distance and hence higher experience utility.
-        """
-        if self.last_received_bid is not None:
-            distance = self.bid_distance(bid, self.last_received_bid)
-            experienced_util = 1 - distance
-        else:
-            experienced_util = 1.0
-        return experienced_util
-
-    def bid_distance(self, bid1: Bid, bid2: Bid) -> float:
-        """
-        Computes a simple normalized distance between two bids.
-        """
-        issues = list(bid1.getIssueValues().keys())
-        total = len(issues)
-        if total == 0:
-            return 0.0
-        diff_count = sum(1 for issue in issues if bid1.getIssueValues()[issue] != bid2.getIssueValues()[issue])
-        return diff_count / total
-
-# TODO: Add time dependence/pressure
