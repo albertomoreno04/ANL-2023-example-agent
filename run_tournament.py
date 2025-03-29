@@ -17,23 +17,38 @@ if not RESULTS_DIR.exists():
 #   You need to specify a time deadline (is milliseconds (ms)) we are allowed to negotiate before we end without agreement.
 tournament_settings = {
     "agents": [
-        { "class": "agents.group32_agent.group32_agent.Group32Agent",
-            "parameters": {"storage_dir": "agent_storage/Group32Agent"}
-          },
         {
-            "class": "agents.conceder_agent.conceder_agent.ConcederAgent",
+            "class": "agents.stupid_agent.stupid_agent.StupidAgent",
         },
+        # {
+        #     "class": "agents.group32_agent.group32_agent.Group32Agent",
+        #     "parameters": {"storage_dir": "agent_storage/Group32Agent"},
+        # },
         {
-            "class": "agents.hardliner_agent.hardliner_agent.HardlinerAgent",
-        },
-        {
-            "class": "agents.linear_agent.linear_agent.LinearAgent",
+            "class": "agents.ANL2022.dreamteam109_agent.dreamteam109_agent.DreamTeam109Agent",
+            "parameters": {"storage_dir": "agent_storage/DreamTeam109Agent"},
         },
     ],
     "profile_sets": [
-        ["domains/domain05/profileA.json", "domains/domain05/profileB.json"],
         ["domains/domain01/profileA.json", "domains/domain01/profileB.json"],
         ["domains/domain02/profileA.json", "domains/domain02/profileB.json"],
+        ["domains/domain03/profileA.json", "domains/domain03/profileB.json"],
+        ["domains/domain04/profileA.json", "domains/domain04/profileB.json"],
+        ["domains/domain05/profileA.json", "domains/domain05/profileB.json"],
+        ["domains/domain06/profileA.json", "domains/domain06/profileB.json"],
+        ["domains/domain07/profileA.json", "domains/domain07/profileB.json"],
+        ["domains/domain08/profileA.json", "domains/domain08/profileB.json"],
+        ["domains/domain09/profileA.json", "domains/domain09/profileB.json"],
+        ["domains/domain10/profileA.json", "domains/domain10/profileB.json"],
+        ["domains/domain11/profileA.json", "domains/domain11/profileB.json"],
+        ["domains/domain12/profileA.json", "domains/domain12/profileB.json"],
+        ["domains/domain13/profileA.json", "domains/domain13/profileB.json"],
+        ["domains/domain14/profileA.json", "domains/domain14/profileB.json"],
+        ["domains/domain15/profileA.json", "domains/domain15/profileB.json"],
+        ["domains/domain16/profileA.json", "domains/domain16/profileB.json"],
+        ["domains/domain17/profileA.json", "domains/domain17/profileB.json"],
+        ["domains/domain18/profileA.json", "domains/domain18/profileB.json"],
+
     ],
     "deadline_time_ms": 10000,
 }

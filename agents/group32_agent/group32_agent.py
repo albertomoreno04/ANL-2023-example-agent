@@ -6,6 +6,7 @@ from random import randint
 import time
 from typing import cast, TypedDict, List
 
+import numpy as np
 from geniusweb.actions.Accept import Accept # Accept Offer (Action with Bid)
 from geniusweb.actions.Action import Action
 from geniusweb.actions.Offer import Offer # Throws Bid
@@ -30,7 +31,6 @@ from geniusweb.progress.ProgressTime import ProgressTime
 from geniusweb.references.Parameters import Parameters
 from tudelft_utilities_logging.ReportToLogger import ReportToLogger
 
-from .utils.group32_opponent import OpponentProfile
 from .utils.group32_bayesian_opponent import OpponentModel
 
 # Loggin Utils
@@ -127,11 +127,17 @@ class Group32Agent(DefaultParty):
             # Initialize all bids
             self.all_bids = AllBidsList(self.domain)
 
+            if hasattr(self, "data_dict") and isinstance(self.data_dict, dict):
+                self.learn_from_past_sessions()
+
         # ActionDone informs you of an action (an offer or an accept)
         # that is performed by one of the agents (including yourself).
         elif isinstance(data, ActionDone):
             action = cast(ActionDone, data).getAction()
             actor = action.getActor()
+
+            # Update session data
+            self.learn_from_past_sessions()
 
             # ignore action if it is our action
             if actor != self.me:
@@ -259,13 +265,22 @@ class Group32Agent(DefaultParty):
         self.send_action(action)
 
     def save_data(self):
-        """This method is called after the negotiation is finished. It can be used to store data
-        for learning capabilities. Note that no extensive calculations can be done within this method.
-        Taking too much time might result in your agent being killed, so use it for storage only.
-        """
-        data = "Data for learning (see README.md)"
-        with open(f"{self.storage_dir}/data.md", "w") as f:
-            f.write(data)
+        """ Stores session data to learn from experience"""
+
+        session_data: SessionData = {
+            "progressAtFinish": self.progress.get(time.time() * 1000),
+            "utilityAtFinish": self.utility_at_finish,
+            "didAccept": self.did_accept,
+            "isGood": self.utility_at_finish >= 0.7,  # Example threshold for 'good' outcomes
+            "topBidsPercentage": self.top_bids_percentage,
+            "forceAcceptAtRemainingTurns": self.force_accept_at_remaining_turns,
+        }
+
+        if not self.data_dict:
+            self.data_dict = {"sessions": []}
+
+        # Append session data to memory structure
+        self.data_dict["sessions"].append(session_data)
 
 
     def accept_condition(self, bid: Bid) -> bool:
@@ -284,7 +299,6 @@ class Group32Agent(DefaultParty):
 
         if progress < 0.3:
             # Exploration phase
-            # TODO: Parametrize as epsilon
             return bid_utility > next_bid_utility + 0.1 and bid_utility > 0.7
 
         elif progress < 0.8:
@@ -314,34 +328,6 @@ class Group32Agent(DefaultParty):
                 return True
 
             return False
-
-
-    def get_rank(self, bid: Bid) -> float:
-        """Calculate the rank number of a given offer.
-
-            The rank is determined by ordering all received bids in descending order of utility,
-            then assigning a rank based on the position of the bid in this list, normalized to [0,1].
-
-            Args:
-                bid (Bid): The bid whose rank number needs to be calculated.
-
-            Returns:
-                float: The rank of the bid, a value between 0 and 1.
-            """
-        if not self.received_bids:
-            return 0.0  # If no bids are received, default to rank 0.
-
-        sorted_bids = sorted(self.received_bids, key=lambda b: self.score_bid(b), reverse=True)
-
-        # Find the index of the bid
-        try:
-            index = sorted_bids.index(bid)
-        except ValueError:
-            return 0.0
-
-        rank = (index + 1) / len(sorted_bids)
-
-        return rank
 
     def find_bid(self) -> Bid:
         num_of_bids = self.all_bids.size()
@@ -401,4 +387,28 @@ class Group32Agent(DefaultParty):
         else:
             return 0.0
 
+    def learn_from_past_sessions(self):
+        """Adapts strategy parameters based on historical performance data stored in self.data_dict."""
+        if not self.data_dict or not self.data_dict.get("sessions"):
+            self.logger.log(logging.INFO, "No past session data available for learning.")
+            return
+
+        sessions = self.data_dict["sessions"]
+
+        # Analyze session outcomes
+        failed_sessions = [s for s in sessions if not s["didAccept"]]
+        successful_sessions = [s for s in sessions if s["didAccept"]]
+        low_utility_sessions = [s for s in successful_sessions if s["utilityAtFinish"] < 0.5]
+
+        # Calculate metrics
+        failure_rate = len(failed_sessions) / len(sessions)
+        avg_utility = np.mean([s["utilityAtFinish"] for s in successful_sessions]) if successful_sessions else 0
+        low_utility_rate = len(low_utility_sessions) / len(sessions)
+
+        self.force_accept_at_remaining_turns = max(0.8, min(1.2, 1.0 + failure_rate * 0.3))
+        self.force_accept_at_remaining_turns_light = max(0.9, min(1.1, 1.0 + low_utility_rate * 0.2))
+
+        self.top_bids_percentage = max(0.005, min(0.05, 0.01 + low_utility_rate * 0.02))
+
+        self.min_util = max(0.3, min(0.5, 0.4 - (avg_utility - 0.5) * 0.1))
 
