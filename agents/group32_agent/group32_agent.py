@@ -31,7 +31,8 @@ from geniusweb.progress.ProgressTime import ProgressTime
 from geniusweb.references.Parameters import Parameters
 from tudelft_utilities_logging.ReportToLogger import ReportToLogger
 
-from .utils.group32_bayesian_opponent import OpponentModel
+# from .utils.group32_bayesian_opponent import OpponentModel
+from .utils.group32_rl_opponent import OpponentModel
 
 # Loggin Utils
 class SessionData(TypedDict):
@@ -91,8 +92,6 @@ class Group32Agent(DefaultParty):
         self.opponent_best_bid: Bid = None
         self.logger.log(logging.INFO, "party is initialized")
 
-
-
     def notifyChange(self, data: Inform):
         """MUST BE IMPLEMENTED
         This is the entry point of all interaction with your agent after is has been initialised.
@@ -123,9 +122,12 @@ class Group32Agent(DefaultParty):
             self.profile = profile_connection.getProfile()
             self.domain = self.profile.getDomain()
             profile_connection.close()
-
             # Initialize all bids
             self.all_bids = AllBidsList(self.domain)
+
+            if self.opponent_model is None:
+                # Initialize model
+                self.opponent_model = OpponentModel(self.domain)
 
             if hasattr(self, "data_dict") and isinstance(self.data_dict, dict):
                 self.learn_from_past_sessions()
@@ -201,12 +203,11 @@ class Group32Agent(DefaultParty):
             bid = cast(Offer, action).getBid()
             # Initialize opponent model if it is not yet initialized.
             if self.opponent_model is None:
-                # possible_types = list(range(1, len(self.domain.getIssues()) + 1))
-                # self.opponent_model = OpponentProfile(self.domain, possible_types)
+                # Initialize model
                 self.opponent_model = OpponentModel(self.domain)
-
-            # Bayesian update based on each bid
-            self.opponent_model.update(bid)
+            # Update Q-values
+            reward = (self.opponent_model.get_predicted_utility(bid) + self.score_bid(bid)) / 2.0
+            self.opponent_model.update(bid, reward)
             self.last_received_bid = bid
             self.received_bids.append(bid)
 
@@ -302,7 +303,7 @@ class Group32Agent(DefaultParty):
             return bid_utility > next_bid_utility + 0.1 and bid_utility > 0.7
 
         elif progress < 0.8:
-            alpha = 1.0
+            alpha = 1.1
             beta = 0.02
             if bid_utility >= alpha * next_bid_utility + beta:
                 return True
@@ -362,19 +363,71 @@ class Group32Agent(DefaultParty):
 
         return self.bids_with_utilities[picked_ranking][0]
 
+    # def find_bid(self) -> Bid:
+    #     num_of_bids = self.all_bids.size()
+    #
+    #     if self.bids_with_utilities is None:
+    #         self.bids_with_utilities = []
+    #
+    #         for index in range(num_of_bids):
+    #             bid = self.all_bids.get(index)
+    #             own_utility = float(self.score_bid(bid))
+    #             opponent_utility = self.opponent_model.get_predicted_utility(bid)
+    #             self.bids_with_utilities.append((bid, own_utility, opponent_utility))
+    #
+    #         # Perform non-dominated sorting (Pareto optimal)
+    #         self.pareto_front = self.get_pareto_front(self.bids_with_utilities)
+    #
+    #     if self.last_received_bid is None:
+    #         # Initially return the best bid from the Pareto front
+    #         return self.pareto_front[0][0]
+    #
+    #     progress = self.progress.get(time.time() * 1000)
+    #     light_threshold = 0.95
+    #
+    #     if progress > light_threshold:
+    #         return self.opponent_best_bid
+    #
+    #     # Randomly choose a bid from the Pareto front to promote diversity
+    #     picked_bid = random.choice(self.pareto_front)[0]
+    #
+    #     return picked_bid
+
+    def get_pareto_front(self, bids_with_utilities):
+        """Perform non-dominated sorting to find the Pareto front."""
+        pareto_front = []
+
+        for candidate in bids_with_utilities:
+            dominated = False
+            for other in bids_with_utilities:
+                if other == candidate:
+                    continue
+                # Check if candidate is dominated by other
+                if other[1] >= candidate[1] and other[2] >= candidate[2] and (
+                        other[1] > candidate[1] or other[2] > candidate[2]):
+                    dominated = True
+                    break
+            if not dominated:
+                pareto_front.append(candidate)
+
+        # Sort Pareto front by own utility, descending
+        pareto_front.sort(key=lambda x: x[1], reverse=True)
+
+        return pareto_front
+
     def score_bid(self, bid: Bid) -> float:
-        # alpha: your own utility for the bid at the current time.
-        alpha = float(self.get_utility(bid))
 
-        # Current belief BT(T)
-        opp_utility = self.get_opponent_utility(bid, self.last_time)
+        u_self = float(self.get_utility(bid))
+        u_opp = float(self.get_opponent_utility(bid, self.last_time))
 
-        lu_self = alpha # Lu(alpha) ~ alpha
-        lu_opp = opp_utility
+        nash_product = u_self * u_opp
+        social_welfare =  (u_self + u_opp) / 2.0
 
-        beta = (lu_opp + lu_self) * opp_utility
+        gamma = 0.6
 
-        return float(min(alpha, beta))
+        score = gamma * nash_product + (1 - gamma) * social_welfare
+
+        return score
 
     def get_utility(self, bid : Bid) -> float:
         pure_util = float(self.profile.getUtility(bid))
