@@ -31,7 +31,7 @@ from geniusweb.progress.ProgressTime import ProgressTime
 from geniusweb.references.Parameters import Parameters
 from tudelft_utilities_logging.ReportToLogger import ReportToLogger
 
-# from .utils.group32_bayesian_opponent import OpponentModel
+#from .utils.group32_bayesian_opponent import OpponentModel
 from .utils.group32_rl_opponent import OpponentModel
 
 # Loggin Utils
@@ -206,7 +206,7 @@ class Group32Agent(DefaultParty):
                 # Initialize model
                 self.opponent_model = OpponentModel(self.domain)
             # Update Q-values
-            reward = (self.opponent_model.get_predicted_utility(bid) + self.score_bid(bid)) / 2.0
+            reward = (self.opponent_model.get_predicted_utility(bid) + self.get_utility(bid)) / 2.0
             self.opponent_model.update(bid, reward)
             self.last_received_bid = bid
             self.received_bids.append(bid)
