@@ -20,7 +20,6 @@ class OpponentModel:
         self.discount_factor = discount_factor
         self.num_time_buckets = num_time_buckets
 
-        # Initialize Q-values for each issue-value pair for each time bucket.
         # The state is defined as (issue, time_bucket) and the action is the chosen value.
         self.q_table = {}
         for issue in domain.getIssues():
@@ -29,13 +28,13 @@ class OpponentModel:
                 self.q_table[(issue, bucket)] = {value: 0.0 for value in values}
 
         self.previous_bid = None
-
-        # It is assumed that self.progress will be assigned externally (e.g., from the negotiation framework)
         self.progress = None
 
     def _get_time_bucket(self, progress: float) -> int:
         """
-        Convert a negotiation progress value (assumed in [0,1]) to a discrete time bucket.
+        Convert a negotiation progress value to a discrete time bucket.
+
+        :return: time bucket index
         """
         bucket = int(progress * self.num_time_buckets)
         if bucket >= self.num_time_buckets:
@@ -44,19 +43,13 @@ class OpponentModel:
 
     def update(self, bid: Bid, reward: float):
         """
-        Update Q-values based on the received bid and associated reward.
-        The state is (issue, time_bucket) and action is the offered value.
+        Update Q-values based on the received bid and associated reward (score function from agent)
 
         Args:
             bid (Bid): The bid offered by the opponent.
             reward (float): The reward signal (e.g., set to 1 for reinforcing the observed choice).
         """
-        # Get current negotiation progress.
-        # If self.progress is set, use it; otherwise, assume a mid-negotiation progress.
-        try:
-            progress = self.progress.get(time.time() * 1000)
-        except AttributeError:
-            progress = 0.5  # default fallback
+        progress = self.progress.get(time.time() * 1000)
 
         bucket = self._get_time_bucket(progress)
 
@@ -66,7 +59,7 @@ class OpponentModel:
             old_q = self.q_table[state][value]
             max_future_q = max(self.q_table[state].values())
 
-            # Standard Q-learning update
+            # Q-learning update with discount factor
             new_q = old_q + self.learning_rate * (reward + self.discount_factor * max_future_q - old_q)
             self.q_table[state][value] = new_q
 
@@ -75,12 +68,11 @@ class OpponentModel:
     def get_predicted_utility(self, bid: Bid) -> float:
         """
         Predict the opponent's utility for a given bid.
-        For each issue, obtain the Q-value (which reflects the opponent's preference)
-        for the offered value at the current time bucket, and average these values.
+        For each issue, obtain the Q-value for the offered value at the current time bucket, and average these values.
 
-        Returns:
-            float: The estimated utility in [0,1] (if Q-values are normalized appropriately).
+        :return: The estimated utility in [0,1].
         """
+
         try:
             progress = self.progress.get(time.time() * 1000)
         except AttributeError:
@@ -101,7 +93,9 @@ class OpponentModel:
 
     def choose_best_bid(self, possible_bids: list[Bid]) -> Bid:
         """
-        Select the bid with the highest predicted opponent utility from a list of possible bids.
+        Selects the bid with the highest utility.
+
+        :return: Selected bid
         """
         best_bid = max(possible_bids, key=self.get_predicted_utility)
         return best_bid
