@@ -1,10 +1,11 @@
 import time
 from geniusweb.issuevalue.Bid import Bid
 from geniusweb.issuevalue.Domain import Domain
+from geniusweb.progress.Progress import Progress
 
 
 class OpponentModel:
-    def __init__(self, domain: Domain, learning_rate: float = 0.1, discount_factor: float = 0.9,
+    def __init__(self, domain: Domain, progress : Progress, learning_rate: float = 0.1, discount_factor: float = 0.9,
                  num_time_buckets: int = 10):
         """
         Initialize the opponent model.
@@ -19,6 +20,7 @@ class OpponentModel:
         self.learning_rate = learning_rate
         self.discount_factor = discount_factor
         self.num_time_buckets = num_time_buckets
+        self.progress = progress
 
         # The state is defined as (issue, time_bucket) and the action is the chosen value.
         self.q_table = {}
@@ -28,7 +30,6 @@ class OpponentModel:
                 self.q_table[(issue, bucket)] = {value: 0.0 for value in values}
 
         self.previous_bid = None
-        self.progress = None
 
     def _get_time_bucket(self, progress: float) -> int:
         """
@@ -49,7 +50,10 @@ class OpponentModel:
             bid (Bid): The bid offered by the opponent.
             reward (float): The reward signal (e.g., set to 1 for reinforcing the observed choice).
         """
-        progress = self.progress.get(time.time() * 1000)
+        try:
+            progress = self.progress.get(time.time() * 1000)
+        except AttributeError:
+            progress = 0.5
 
         bucket = self._get_time_bucket(progress)
 

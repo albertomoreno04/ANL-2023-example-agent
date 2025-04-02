@@ -100,7 +100,7 @@ class Group32Agent(DefaultParty):
 
             if self.opponent_model is None:
                 # Initialize model
-                self.opponent_model = OpponentModel(self.domain)
+                self.opponent_model = OpponentModel(self.domain, self.progress)
 
         # ActionDone informs you of an action (an offer or an accept)
         # that is performed by one of the agents (including yourself).
