@@ -2,6 +2,7 @@ import json
 import time
 from pathlib import Path
 
+from agents.group32_agent.utils.pareto_frontier_generator import compute_pareto_frontier, plot_pareto
 from utils.plot_trace import plot_trace
 from utils.runners import run_session
 
@@ -18,15 +19,15 @@ if not RESULTS_DIR.exists():
 settings = {
     "agents": [
         {
-            "class": "agents.ANL2022.dreamteam109_agent.dreamteam109_agent.DreamTeam109Agent",
-            "parameters": {"storage_dir": "agent_storage/DreamTeam109Agent"},
+            "class": "agents.conceder_agent.conceder_agent.ConcederAgent",
+            "parameters": {"storage_dir": "agent_storage/ConcederAgent"},
         },
         {
             "class": "agents.group32_agent.group32_agent.Group32Agent",
             "parameters": {"storage_dir": "agent_storage/Group32Agent"},
         },
     ],
-    "profiles": ["domains/domain16/profileA.json", "domains/domain16/profileB.json"],
+    "profiles": ["domains/domain32/profileA.json", "domains/domain32/profileB.json"],
     "deadline_time_ms": 10000,
 }
 
@@ -36,6 +37,7 @@ session_results_trace, session_results_summary = run_session(settings)
 # plot trace to html file
 if not session_results_trace["error"]:
     plot_trace(session_results_trace, RESULTS_DIR.joinpath("trace_plot.html"))
+    plot_pareto(results_trace=session_results_trace, pareto_frontier=compute_pareto_frontier(settings_profiles=settings["profiles"]), plot_file= RESULTS_DIR.joinpath("pareto.html"))
 
 # write results to file
 with open(RESULTS_DIR.joinpath("/session_results_trace.json"), "w", encoding="utf-8") as f:
